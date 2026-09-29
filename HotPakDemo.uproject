@@ -1,0 +1,22 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "{307AD585-469B-7D9F-AE65-A6BF2AF28AE9}",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "HotPakDemo",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		}
+	]
+}

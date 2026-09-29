@@ -1,0 +1,26 @@
+[
+	{
+		"file": "D:\\UE\\UnrealProjects\\HotPakDemo\\Source\\HotPakDemo\\HotPakDemo.Build.cs",
+		"arguments": [
+			"D:\\VS\\VS2022\\VS Exe\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
+			"@D:\\UE\\UnrealProjects\\HotPakDemo\\.vscode\\compileCommands_HotPakDemo\\HotPakDemo.1.rsp"
+		],
+		"directory": "D:\\UE\\UE_5.7\\Engine\\Source"
+	},
+	{
+		"file": "D:\\UE\\UnrealProjects\\HotPakDemo\\Source\\HotPakDemo\\HotPakDemo.cpp",
+		"arguments": [
+			"D:\\VS\\VS2022\\VS Exe\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
+			"@D:\\UE\\UnrealProjects\\HotPakDemo\\.vscode\\compileCommands_HotPakDemo\\HotPakDemo.1.rsp"
+		],
+		"directory": "D:\\UE\\UE_5.7\\Engine\\Source"
+	},
+	{
+		"file": "D:\\UE\\UnrealProjects\\HotPakDemo\\Source\\HotPakDemo\\HotPakDemo.h",
+		"arguments": [
+			"D:\\VS\\VS2022\\VS Exe\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
+			"@D:\\UE\\UnrealProjects\\HotPakDemo\\.vscode\\compileCommands_HotPakDemo\\HotPakDemo.1.rsp"
+		],
+		"directory": "D:\\UE\\UE_5.7\\Engine\\Source"
+	}
+]
