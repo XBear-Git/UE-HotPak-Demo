@@ -1,0 +1,2 @@
+"D:\UE\UnrealProjects\HotPakDemo\Saved\Cooked\Windows\HotPakDemo\Content\HotPatchDemo\DataTables\DT_HotfixConfig.uasset" "../../../HotPakDemo/Content/HotPatchDemo/DataTables/DT_HotfixConfig.uasset"
+"D:\UE\UnrealProjects\HotPakDemo\Saved\Cooked\Windows\HotPakDemo\Content\HotPatchDemo\DataTables\DT_HotfixConfig.uexp" "../../../HotPakDemo/Content/HotPatchDemo/DataTables/DT_HotfixConfig.uexp"

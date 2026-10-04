@@ -5,6 +5,7 @@
 #include "HotUpdateSubsystem.h"
 #include "Engine/DataTable.h"
 #include "Engine/Engine.h"
+#include "Engine/LevelStreaming.h"
 #include "Engine/Texture2D.h"
 #include "Engine/World.h"
 #include "../HotPakDemo.h"
@@ -115,6 +116,17 @@ void ABaseHotTestActor::ForceReloadAllSlots()
 	{
 		UE_LOG(LogHotUpdate, Verbose, TEXT("%s: streaming level slot is not configured."), *GetName());
 	}
+}
+
+bool ABaseHotTestActor::IsStreamingLevelLoaded(FName LevelPackageName) const
+{
+	if (LevelPackageName.IsNone())
+	{
+		return false;
+	}
+
+	const ULevelStreaming* StreamingLevel = UGameplayStatics::GetStreamingLevel(this, LevelPackageName);
+	return IsValid(StreamingLevel) && StreamingLevel->IsLevelLoaded();
 }
 
 void ABaseHotTestActor::UpdateTexture_Implementation(UTexture2D* NewTex)

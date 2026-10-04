@@ -37,6 +37,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Hot Test|State")
 	void ForceReloadAllSlots();
 
+	/** Returns whether the named streaming level has finished loading into this world. */
+	UFUNCTION(BlueprintPure, Category = "Hot Test|State")
+	bool IsStreamingLevelLoaded(FName LevelPackageName) const;
+
 	/** Assigns the texture slot to a Blueprint-owned material or component. */
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Hot Test|Slots")
 	void UpdateTexture(UTexture2D* NewTex);

@@ -1,0 +1,64 @@
+{
+  "version": "1.0.0",
+  "project": "HotPakDemo",
+  "engine": "5.7.4",
+  "tracked_dir": "HotPatchDemo",
+  "files": {
+    "HotPatchDemo/Blueprints/BP_PatchActor.uasset": {
+      "sha256": "e1e75ee56cd1fb2fd0564f768e5a69642453ceac4d49a67631606d1cd2aad7a3",
+      "size": 2503
+    },
+    "HotPatchDemo/Blueprints/BP_PatchActor.uexp": {
+      "sha256": "a8448ad7ceb45867ece28f0059a8cc7f49857a838e2cc786ecbc3cbc6f68991b",
+      "size": 376
+    },
+    "HotPatchDemo/Core/BP_HotTest.uasset": {
+      "sha256": "add55206b62b9bb69275b1cfeb66e4455b87d94eaee84bf425969f59cfe1a824",
+      "size": 7530
+    },
+    "HotPatchDemo/Core/BP_HotTest.uexp": {
+      "sha256": "30a44ff5ea0fef12daba1b763ddfeab723da2313851ae20c2956d3692e8ccb21",
+      "size": 4996
+    },
+    "HotPatchDemo/DataTables/DT_HotfixConfig.uasset": {
+      "sha256": "21f0d0d1c48caf809d8880e5d64ca7ea85783ec59bd8e7b66dc76ea1233ce60a",
+      "size": 867
+    },
+    "HotPatchDemo/DataTables/DT_HotfixConfig.uexp": {
+      "sha256": "6f57056cf87a008c10b9af1d0cc4c2b1838420da1b312eb1d8a92709af17b903",
+      "size": 124
+    },
+    "HotPatchDemo/Maps/L_Main.uexp": {
+      "sha256": "b66cd1aa41a773caad62ba7db78e672d94e51235776d851ee6b9c1818b811105",
+      "size": 2181
+    },
+    "HotPatchDemo/Maps/L_Main.umap": {
+      "sha256": "d797863be6eee99dedfebde75281b1a58fbdc918588986b3fcd76b555e45a3d5",
+      "size": 7136
+    },
+    "HotPatchDemo/Materials/M_HotfixTexture.uasset": {
+      "sha256": "8f6809a4ecdef4238f099682b2222a7eddd45dda6c4421d29edd9f860171b41b",
+      "size": 864
+    },
+    "HotPatchDemo/Materials/M_HotfixTexture.uexp": {
+      "sha256": "300b07d6bcc31d3ef1966ec39d06de0c2469d6d69a3b838ab60f1d823b661a39",
+      "size": 8342
+    },
+    "HotPatchDemo/Textures/T_HotfixTexture.uasset": {
+      "sha256": "edb0803b193e0fa262cc2734aa2f454f801beecabf978a9109d935ec05ff8e89",
+      "size": 788
+    },
+    "HotPatchDemo/Textures/T_HotfixTexture.uexp": {
+      "sha256": "ce11b81d0f3a38238c6d12a7c54641a2d2292af82ef733ae61a921b8ff82ffda",
+      "size": 4194452
+    },
+    "HotPatchDemo/UI/WBP_VersionDisplay.uasset": {
+      "sha256": "cb9245dd9dac0559e76f74961cae31e19681e1435c90743c40f382340840ff5f",
+      "size": 3981
+    },
+    "HotPatchDemo/UI/WBP_VersionDisplay.uexp": {
+      "sha256": "c088d4eb23743eef570e659c7d7e48b0f1755f6fdfa018b155708db17b633568",
+      "size": 2445
+    }
+  }
+}

@@ -2,7 +2,123 @@
 
 #include "HotUpdateSubsystem.h"
 
+#include "Engine/Engine.h"
+#include "HAL/PlatformFileManager.h"
+#include "IPlatformFilePak.h"
+#include "Misc/Paths.h"
+
 #include "../HotPakDemo.h"
+
+void UHotUpdateSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+{
+	Super::Initialize(Collection);
+
+	// Console command for manual testing in a packaged build:
+	//   HotUpdate.MountPak "D:/path/to/test.pak"
+	MountPakConsoleCommand = MakeUnique<FAutoConsoleCommand>(
+		TEXT("HotUpdate.MountPak"),
+		TEXT("Mount a pak file at runtime. Usage: HotUpdate.MountPak <PakFilePath>"),
+		FConsoleCommandWithArgsDelegate::CreateUObject(this, &UHotUpdateSubsystem::HandleMountPakCommand)
+	);
+}
+
+void UHotUpdateSubsystem::Deinitialize()
+{
+	MountPakConsoleCommand.Reset();
+	Super::Deinitialize();
+}
+
+bool UHotUpdateSubsystem::MountPak(const FString& PakFilePath)
+{
+	if (PakFilePath.IsEmpty())
+	{
+		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] MountPak: empty pak path."));
+		return false;
+	}
+
+	// Locate the pak platform file layer. It only exists in a packaged build
+	// (or when -pak is passed), so this is a meaningful guard for the POC.
+	FPakPlatformFile* PakPlatformFile = static_cast<FPakPlatformFile*>(
+		FPlatformFileManager::Get().FindPlatformFile(FPakPlatformFile::GetTypeName()));
+	if (!PakPlatformFile)
+	{
+		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] MountPak: FPakPlatformFile unavailable (are you in a packaged build?)."));
+		return false;
+	}
+
+	// Pass nullptr as the mount point so Mount() uses the pak's own recorded
+	// mount point (verified against FPakPlatformFile::Mount source). PakOrder 100
+	// places this pak above the base pak (order 0), so its assets win lookups.
+	constexpr uint32 PatchPakOrder = 100;
+	if (!PakPlatformFile->Mount(*PakFilePath, PatchPakOrder, nullptr))
+	{
+		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] MountPak: failed to mount '%s' (invalid file, missing key, or already mounted?)."), *PakFilePath);
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 6.0f, FColor::Red,
+				FString::Printf(TEXT("HotUpdate: 挂载失败 %s"), *FPaths::GetCleanFilename(PakFilePath)));
+		}
+		return false;
+	}
+
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] MountPak: mounted '%s' (order=%d)."), *PakFilePath, PatchPakOrder);
+
+	// Immediate on-screen feedback: Log-level messages don't show on screen in a
+	// packaged build, so use AddOnScreenDebugMessage for a visible confirmation.
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 6.0f, FColor::Green,
+			FString::Printf(TEXT("HotUpdate: 挂载成功 %s"), *FPaths::GetCleanFilename(PakFilePath)));
+	}
+
+	// Log the mounted pak list so the mount can be verified in the output log.
+	TArray<FString> MountedPaks;
+	PakPlatformFile->GetMountedPakFilenames(MountedPaks);
+	for (const FString& MountedPak : MountedPaks)
+	{
+		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] MountPak: mounted pak -> %s"), *MountedPak);
+	}
+
+	// POC hook: notify observers (e.g. ABaseHotTestActor) through the existing
+	// callback contract. The real version string will come from the remote
+	// manifest (Day 3), and rollback from a failed mount is added later (Day 6).
+	NotifyHotfixApplied(TEXT("1.1.0"));
+	return true;
+}
+
+TArray<FString> UHotUpdateSubsystem::GetMountedPakFilenames() const
+{
+	TArray<FString> Result;
+
+	if (FPakPlatformFile* PakPlatformFile = static_cast<FPakPlatformFile*>(
+		FPlatformFileManager::Get().FindPlatformFile(FPakPlatformFile::GetTypeName())))
+	{
+		PakPlatformFile->GetMountedPakFilenames(Result);
+	}
+
+	return Result;
+}
+
+void UHotUpdateSubsystem::HandleMountPakCommand(const TArray<FString>& Args)
+{
+	if (Args.Num() < 1)
+	{
+		UE_LOG(LogHotUpdate, Warning, TEXT("[HotUpdate] Usage: HotUpdate.MountPak <PakFilePath>"));
+		return;
+	}
+
+	// Join in case the path contains spaces, then strip surrounding double quotes
+	// (the UE console passes quotes through literally instead of stripping them).
+	FString PakPath = FString::Join(Args, TEXT(" "));
+	PakPath.TrimStartAndEndInline();
+	if (PakPath.Len() >= 2 && PakPath[0] == TEXT('"') && PakPath[PakPath.Len() - 1] == TEXT('"'))
+	{
+		PakPath = PakPath.Mid(1, PakPath.Len() - 2);
+	}
+
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] MountPak command received: '%s'"), *PakPath);
+	MountPak(PakPath);
+}
 
 void UHotUpdateSubsystem::NotifyHotfixApplied(const FString& NewVersion)
 {

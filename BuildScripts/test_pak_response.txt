@@ -1,0 +1,2 @@
+"D:\UE\UnrealProjects\HotPakDemo\Saved\Cooked\Windows\HotPakDemo\Content\HotPatchDemo\Textures\T_HotfixTexture.uasset" "../../../HotPakDemo/Content/HotPatchDemo/Textures/T_HotfixTexture.uasset"
+"D:\UE\UnrealProjects\HotPakDemo\Saved\Cooked\Windows\HotPakDemo\Content\HotPatchDemo\Textures\T_HotfixTexture.uexp" "../../../HotPakDemo/Content/HotPatchDemo/Textures/T_HotfixTexture.uexp"

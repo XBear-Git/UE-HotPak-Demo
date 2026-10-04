@@ -1,0 +1,13 @@
+{
+  "latest_version": "1.1.0",
+  "min_supported_client": "1.0.0",
+  "force_update": false,
+  "pak": {
+    "url": "http://127.0.0.1:8000/patches/Patch_1.0.0_to_1.1.0.pak",
+    "size": 1603,
+    "sha256": "33dc96ebb8526b43ced5633f4f79f9c2c7e3001ffd8ab0010a6e36d8332a27b1",
+    "order": 100,
+    "mount_point": "../../../HotPakDemo/Content/"
+  },
+  "changelog": "自研补丁管线生成的增量包 1.0.0 -> 1.1.0"
+}
