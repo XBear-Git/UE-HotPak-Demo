@@ -6,6 +6,7 @@
 #include "HAL/PlatformFileManager.h"
 #include "IPlatformFilePak.h"
 #include "Misc/Paths.h"
+#include "VersionManager.h"
 
 #include "../HotPakDemo.h"
 
@@ -20,11 +21,42 @@ void UHotUpdateSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		TEXT("Mount a pak file at runtime. Usage: HotUpdate.MountPak <PakFilePath>"),
 		FConsoleCommandWithArgsDelegate::CreateUObject(this, &UHotUpdateSubsystem::HandleMountPakCommand)
 	);
+
+	// Console command to re-run the Day 3 version check without restarting:
+	//   HotUpdate.CheckForUpdate
+	CheckForUpdateConsoleCommand = MakeUnique<FAutoConsoleCommand>(
+		TEXT("HotUpdate.CheckForUpdate"),
+		TEXT("Re-run the update check (GET version.json and compare versions)."),
+		FConsoleCommandWithArgsDelegate::CreateUObject(this, &UHotUpdateSubsystem::HandleCheckForUpdateCommand)
+	);
+
+	// Console command to inspect the current update status:
+	//   HotUpdate.Status
+	StatusConsoleCommand = MakeUnique<FAutoConsoleCommand>(
+		TEXT("HotUpdate.Status"),
+		TEXT("Print local version, remote version and current update state."),
+		FConsoleCommandWithArgsDelegate::CreateUObject(this, &UHotUpdateSubsystem::HandleStatusCommand)
+	);
+
+	// Day 3: create the update state machine and the version manager, wire the
+	// state broadcast through to this subsystem, then run the first check.
+	UpdateStateMachine = NewObject<UUpdateStateMachine>(this);
+	VersionManager = NewObject<UVersionManager>(this);
+
+	if (UpdateStateMachine && VersionManager)
+	{
+		UpdateStateMachine->OnStateChanged.AddDynamic(this, &UHotUpdateSubsystem::HandleUpdateStateChanged);
+		VersionManager->Initialize(UpdateStateMachine);
+	}
+
+	StartUpdateCheck();
 }
 
 void UHotUpdateSubsystem::Deinitialize()
 {
 	MountPakConsoleCommand.Reset();
+	CheckForUpdateConsoleCommand.Reset();
+	StatusConsoleCommand.Reset();
 	Super::Deinitialize();
 }
 
@@ -118,6 +150,75 @@ void UHotUpdateSubsystem::HandleMountPakCommand(const TArray<FString>& Args)
 
 	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] MountPak command received: '%s'"), *PakPath);
 	MountPak(PakPath);
+}
+
+void UHotUpdateSubsystem::HandleCheckForUpdateCommand(const TArray<FString>& Args)
+{
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 手动触发版本检测。"));
+	StartUpdateCheck();
+}
+
+void UHotUpdateSubsystem::HandleStatusCommand(const TArray<FString>& Args)
+{
+	// 本地版本即时从存档读取；远端版本来自最近一次检测（由 CheckForUpdate 填充）。
+	const FString LocalVersion = VersionManager
+		? VersionManager->QueryLocalVersion()
+		: FString(TEXT("<未初始化>"));
+	const FString RemoteVersion = (VersionManager && !VersionManager->GetRemoteVersion().IsEmpty())
+		? VersionManager->GetRemoteVersion()
+		: FString(TEXT("<未知，尚未成功检测>"));
+	const FString StateName = UUpdateStateMachine::GetStateDisplayName(GetUpdateState());
+
+	const FString Message = FString::Printf(
+		TEXT("HotUpdate 状态：本地版本=%s，远端版本=%s，当前状态=%s"),
+		*LocalVersion, *RemoteVersion, *StateName);
+
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] %s"), *Message);
+
+	// 打包版 Log 不上屏，这里用 AddOnScreenDebugMessage 给出可见反馈。
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 10.0f, FColor::Cyan, Message);
+	}
+}
+
+void UHotUpdateSubsystem::StartUpdateCheck()
+{
+	if (!VersionManager)
+	{
+		UE_LOG(LogHotUpdate, Warning, TEXT("[HotUpdate] StartUpdateCheck: VersionManager 尚未初始化。"));
+		return;
+	}
+
+	VersionManager->CheckForUpdate();
+}
+
+EHotUpdateState UHotUpdateSubsystem::GetUpdateState() const
+{
+	return UpdateStateMachine ? UpdateStateMachine->GetCurrentState() : EHotUpdateState::Idle;
+}
+
+void UHotUpdateSubsystem::HandleUpdateStateChanged(EHotUpdateState OldState, EHotUpdateState NewState)
+{
+	// Log-level messages don't show on screen in a packaged build, so surface the
+	// state change with a colored on-screen message as well (see Day 1 pitfall #3).
+	if (GEngine)
+	{
+		FColor Color = FColor::Green;
+		if (NewState == EHotUpdateState::NeedUpdate || NewState == EHotUpdateState::ForceUpdate)
+		{
+			Color = FColor::Yellow;
+		}
+		else if (NewState == EHotUpdateState::Failed)
+		{
+			Color = FColor::Red;
+		}
+
+		GEngine->AddOnScreenDebugMessage(-1, 6.0f, Color,
+			FString::Printf(TEXT("HotUpdate 状态: %s"), *UUpdateStateMachine::GetStateDisplayName(NewState)));
+	}
+
+	OnUpdateStateChanged.Broadcast(OldState, NewState);
 }
 
 void UHotUpdateSubsystem::NotifyHotfixApplied(const FString& NewVersion)

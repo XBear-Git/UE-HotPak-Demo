@@ -14,7 +14,7 @@
 - **客户端**启动时拉取清单做差异比对，仅下载变更的增量 Pak，校验后运行时挂载生效；
 - 挂载失败支持回滚（规划中）。
 
-当前阶段（Day 1 ~ Day 2）已跑通**手动热更新闭环**，后续逐步接入「自动检测 → 下载 → 校验 → 挂载」的自动化流程。
+当前阶段（Day 1 ~ Day 3）已跑通**手动热更新闭环**与**客户端启动自动版本检测**，后续逐步接入「下载 → 校验 → 挂载」的自动化流程。
 
 ---
 
@@ -27,6 +27,10 @@
 | ✅ 热更新验证框架 | 子系统（状态/回调）+ 测试 Actor（四类资源槽）+ DataTable 行结构，三层解耦 |
 | ✅ 自研补丁生成管线 | Python 脚本：导出基线 → SHA256 diff → UnrealPak 打增量 Pak |
 | ✅ 服务端版本清单 | `PatchServer/version.json`（版本号、URL、大小、SHA256、挂载点） |
+| ✅ 远端版本清单拉取与比对 | `UVersionManager` 用 `FHttpModule` 异步 GET `version.json`，按**数字分段**比较版本，输出「需更新 / 已最新 / 强制更新」 |
+| ✅ 更新流程状态机 | `UUpdateStateMachine` 定义 `EHotUpdateState`（`Idle → Checking → UpToDate / NeedUpdate / ForceUpdate` 已实现，下载/校验/挂载等为占位），每次转移打印日志并广播 |
+| ✅ 本地版本持久化 | `UVersionRecord`（`USaveGame`）写入固定槽 `HotUpdateVersion`，作为下次启动比对基线（FR-08） |
+| ✅ 本地 HTTP 静态服务 | `python -m http.server 8000` 把 `PatchServer/` 当静态站点，模拟服务端下发清单与 Pak |
 
 ---
 
@@ -49,7 +53,7 @@
 ```
 HotPakDemo/
 ├── Source/HotPakDemo/               C++ 运行时模块
-│   ├── Core/                        核心逻辑（挂载子系统、测试 Actor）
+│   ├── Core/                        核心逻辑（挂载子系统、更新状态机、版本管理/持久化、测试 Actor）
 │   ├── Structs/                     DataTable 行结构
 │   └── HotPakDemo.Build.cs          模块依赖
 ├── Content/HotPatchDemo/            热更测试资源（按类型分目录）
@@ -72,7 +76,10 @@ HotPakDemo/
 
 | 文件 | 职责 |
 |---|---|
-| `Core/HotUpdateSubsystem.h/.cpp` | **核心**。`UGameInstanceSubsystem`，提供运行时 Pak 挂载（`MountPak`）、挂载状态、回调契约（`OnHotfixApplied`）。注册 `HotUpdate.MountPak` 控制台命令 |
+| `Core/HotUpdateSubsystem.h/.cpp` | **核心/编排**。`UGameInstanceSubsystem`，`Initialize` 时创建状态机与版本管理器并自动发起一次检测；提供运行时 Pak 挂载（`MountPak`）、挂载状态、回调契约（`OnHotfixApplied`）、更新状态广播（`OnUpdateStateChanged`）。注册控制台命令 `HotUpdate.MountPak` / `HotUpdate.CheckForUpdate` / `HotUpdate.Status` |
+| `Core/UpdateStateMachine.h/.cpp` | 更新状态机。`EHotUpdateState` 枚举（`Idle/Checking/UpToDate/NeedUpdate/ForceUpdate` 已实现，`Downloading/Verifying/Mounting/Done/Failed/RollingBack` 为 Day 4~6 占位）；`TransitionTo()` 打印日志并广播 `OnStateChanged` |
+| `Core/VersionManager.h/.cpp` | 版本检测与比对。`FHttpModule` 异步 GET `version.json`，解析 `latest_version` / `min_supported_client` / `force_update`，`CompareVersion()` 按数字分段比较（避免 `"1.10" < "1.9"`），判定三分支并驱动状态机 |
+| `Core/VersionRecord.h/.cpp` | 本地版本持久化（`USaveGame`）。槽名固定 `HotUpdateVersion`，提供 `SaveVersion()` / `LoadVersion()`，作为下次启动比对基线（FR-08） |
 | `Core/BaseHotTestActor.h/.cpp` | 热更验证场景的执行器。持有四类软引用资源槽（贴图/数据表/Actor/关卡），观察子系统回调，提供 `ForceReloadAllSlots()` 手动刷新入口 |
 | `Structs/ST_HotfixConfig.h` | `FTableRowBase` 子类，DataTable 行结构（版本号、倍率、生命、标题、开关、颜色等），用于验证数据热更 |
 | `HotPakDemo.cpp/.h` | 主模块 + `LogHotUpdate` 日志分类 |
@@ -82,6 +89,7 @@ HotPakDemo/
 - **挂载点对齐**：`MountPak` 调用 `FPakPlatformFile::Mount(pakPath, order, nullptr)`，传 `nullptr` 让引擎使用 Pak 自带的挂载点，自动对齐（避免 MountPoint 踩坑）。
 - **覆盖优先级**：增量 Pak 以 `PakOrder = 100` 挂载，高于基础包（order 0），资源查找时补丁优先。
 - **可观测性**：挂载成功/失败用 `AddOnScreenDebugMessage` 在屏幕显示（绿/红），同时 `UE_LOG(LogHotUpdate, ...)` 记录到日志文件。
+- **异步安全**：HTTP 回调通过 `BindUObject`（弱引用）绑定，对象销毁后不会悬空调用。
 
 ---
 
@@ -130,6 +138,34 @@ HotUpdate.MountPak D:\UE\UnrealProjects\HotPakDemo\PatchServer\patches\Patch_1.0
 
 屏幕出现绿色「挂载成功」即生效。
 
+### 启动本地 HTTP 服务（版本检测用）
+
+```powershell
+cd PatchServer
+python -m http.server 8000
+```
+
+浏览器或 `Invoke-WebRequest http://127.0.0.1:8000/version.json` 能取到 JSON 即正常。
+
+### 版本检测验证（Day 3）
+
+打包版游戏按 `~` 打开控制台：
+
+```
+HotUpdate.CheckForUpdate   # 重新拉取 version.json 并与本地版本比对
+HotUpdate.Status           # 打印「本地版本 / 远端版本 / 当前状态」
+```
+
+默认本地版本为 `1.0.0`（存档不存在时回落默认值）。只改 `PatchServer/version.json` 的字段即可复现三分支：
+
+| 分支 | `latest_version` | `min_supported_client` | 本地 `1.0.0` 时的结果 |
+|---|---|---|---|
+| 需更新 | `1.1.0` | `1.0.0` | `Checking → NeedUpdate` |
+| 强制更新 | `1.1.0` | `1.1.0` | `Checking → ForceUpdate` |
+| 已最新 | `1.0.0` | `1.0.0` | `Checking → UpToDate`（并把远端版本写入本地存档） |
+
+本地版本存档位置：`<打包目录>\Saved\SaveGames\HotUpdateVersion.sav`，删除它即可重置为默认 `1.0.0`。
+
 ---
 
 ## 八、热更新流程（当前阶段）
@@ -143,7 +179,11 @@ export_release.py 导出基线（Release_1.0.0.json）
    ↓
 gen_patch.py 生成增量 Pak（Patch_1.0.0_to_1.1.0.pak）+ version.json
    ↓
-运行时 HotUpdate.MountPak 挂载 → 资源生效
+（服务端）python -m http.server 8000 提供 version.json / Pak
+   ↓
+客户端启动 → 拉清单比对 → UpToDate / NeedUpdate / ForceUpdate   ← Day 3 已实现
+   ↓
+下载 → 校验 → 挂载 → 资源生效                                   ← Day 4 / Day 5 待接入
 ```
 
 ---
@@ -152,10 +192,12 @@ gen_patch.py 生成增量 Pak（Patch_1.0.0_to_1.1.0.pak）+ version.json
 
 **当前局限**（自研管线的最小实现）：
 - 不含依赖分析（只打入变更文件本身，对标 HotPatcher「包含依赖」待扩展）；
-- 补丁挂载目前靠手动控制台命令触发，尚未自动化。
+- 版本检测已自动化，但**下载 / 校验 / 挂载**尚未接入；补丁挂载目前仍靠手动控制台命令触发；
+- 本地版本在「已最新」分支写入（Day 3 验证用），「挂载成功后写入」留待 Day 5；
+- 删除资源只列出、未实现删除补丁（资源热更通常不删资源，可忽略）。
 
-**后续规划（Day 3 ~ Day 6）**：
-- [ ] Day 3：`UVersionManager`（拉清单/比对/持久化）+ 更新状态机 + 本地 HTTP 服务
+**后续规划（Day 4 ~ Day 6）**：
+- [x] Day 3：`UVersionManager`（拉清单/比对/持久化）+ 更新状态机 + 本地 HTTP 服务
 - [ ] Day 4：`UPakDownloader`（FHttpModule 下载）+ `.tmp` 落地 + SHA256 校验
 - [ ] Day 5：整合挂载流程（下载 → 校验 → 挂载 → 资源生效）
 - [ ] Day 6：回滚 + 异常处理 + 更新流程 UI
@@ -165,6 +207,7 @@ gen_patch.py 生成增量 Pak（Patch_1.0.0_to_1.1.0.pak）+ version.json
 ## 十、相关文档
 
 - 调研笔记（Day 1 概念 + 踩坑记录）：`D:\AgentContext\资源热更\调研笔记.md`
+- Day 3 工作流程文档（客户端更新器骨架设计）：`D:\AgentContext\资源热更\Day3工作流程文档.md`
 - 补丁生成 SOP：`BuildScripts/README.md`
 
 ---

@@ -11,7 +11,8 @@ public class HotPakDemo : ModuleRules
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput" });
 
 		// PakFile 提供 FPakPlatformFile / FPakFile，用于运行时挂载补丁 Pak（仅 .cpp 使用，故放 Private）。
-		PrivateDependencyModuleNames.AddRange(new string[] { "PakFile" });
+		// HTTP/Json/JsonUtilities：Day 3 版本管理器异步拉取并解析 version.json 需要。
+		PrivateDependencyModuleNames.AddRange(new string[] { "PakFile", "HTTP", "Json", "JsonUtilities" });
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
