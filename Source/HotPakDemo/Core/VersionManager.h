@@ -64,6 +64,22 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Hot Update|Version")
 	bool SaveLocalVersion(const FString& InVersion);
 
+	/** 稳定补丁文件名（启动只挂它；为空表示基础版）。 */
+	UFUNCTION(BlueprintPure, Category = "Hot Update|Version")
+	FString GetStablePakFileName() const;
+
+	/** 上次更新失败的版本号（防 ForceUpdate 死循环）。 */
+	UFUNCTION(BlueprintPure, Category = "Hot Update|Version")
+	FString GetLastFailedVersion() const;
+
+	/** 挂载成功后写入稳定版本 + 稳定补丁文件名（FR-08 唯一写入点，Day 6）。 */
+	UFUNCTION(BlueprintCallable, Category = "Hot Update|Version")
+	bool SaveStableInfo(const FString& InVersion, const FString& InPakFileName);
+
+	/** 记录一次失败的版本（防 ForceUpdate 死循环，Day 6）。 */
+	UFUNCTION(BlueprintCallable, Category = "Hot Update|Version")
+	bool SaveLastFailedVersion(const FString& InVersion);
+
 	/** 远端版本清单地址，可配置以便换端口测试。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hot Update|Version")
 	FString VersionManifestUrl = TEXT("http://127.0.0.1:8000/version.json");

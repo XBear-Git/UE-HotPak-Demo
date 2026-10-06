@@ -3,15 +3,23 @@
 #include "HotUpdateSubsystem.h"
 
 #include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
+#include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
+#include "HAL/PlatformMisc.h"
+#include "HAL/PlatformTime.h"
 #include "IPlatformFilePak.h"
+#include "Misc/CoreDelegates.h"
 #include "Misc/Paths.h"
 #include "PakDownloader.h"
 #include "PakMounter.h"
 #include "PakVerifier.h"
 #include "SHA256.h"
+#include "UpdatePanel.h"
 #include "VersionManager.h"
+#include "VersionRecord.h"
 
 #include "../HotPakDemo.h"
 
@@ -59,6 +67,14 @@ void UHotUpdateSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		FConsoleCommandWithArgsDelegate::CreateUObject(this, &UHotUpdateSubsystem::HandleSelfTestCommand)
 	);
 
+	// Console command to retry after a failure (Day 6):
+	//   HotUpdate.RetryUpdate
+	RetryUpdateConsoleCommand = MakeUnique<FAutoConsoleCommand>(
+		TEXT("HotUpdate.RetryUpdate"),
+		TEXT("Clear the failed-version guard and re-run the update check."),
+		FConsoleCommandWithArgsDelegate::CreateUObject(this, &UHotUpdateSubsystem::HandleRetryUpdateCommand)
+	);
+
 	// Day 3: create the update state machine and the version manager, wire the
 	// state broadcast through to this subsystem, then run the first check.
 	UpdateStateMachine = NewObject<UUpdateStateMachine>(this);
@@ -67,7 +83,6 @@ void UHotUpdateSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	if (UpdateStateMachine && VersionManager)
 	{
 		UpdateStateMachine->OnStateChanged.AddDynamic(this, &UHotUpdateSubsystem::HandleUpdateStateChanged);
-		// Day 4: react to the finished version check to route NeedUpdate / ForceUpdate.
 		VersionManager->OnVersionCheckCompleted.AddDynamic(this, &UHotUpdateSubsystem::HandleVersionCheckCompleted);
 		VersionManager->Initialize(UpdateStateMachine);
 	}
@@ -81,34 +96,48 @@ void UHotUpdateSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	HotUpdateSha256::RunSelfTest();
 #endif
 
-	// Day 5: 启动时先重挂载本地已有补丁，再做版本检测——
-	// 本地补丁在 Saved/HotUpdate 不会被引擎自动挂载，必须主动挂，才能保证重启后资源与版本一致。
-	RemountLocalPatches();
+	// Day 6: Slate 更新面板——引擎循环初始化完成（GameViewport 就绪）后再挂到视口。
+	EngineLoopInitHandle = FCoreDelegates::OnFEngineLoopInitComplete.AddUObject(
+		this, &UHotUpdateSubsystem::HandleEngineLoopInitComplete);
+	CreateUpdatePanel(); // 若此刻已就绪则立即创建；否则等回调
+
+	// Day 5/6: 启动时只挂载「记录的稳定补丁」，再做版本检测。
+	RemountStablePatch();
 
 	StartUpdateCheck();
 }
 
 void UHotUpdateSubsystem::Deinitialize()
 {
+	if (EngineLoopInitHandle.IsValid())
+	{
+		FCoreDelegates::OnFEngineLoopInitComplete.Remove(EngineLoopInitHandle);
+		EngineLoopInitHandle.Reset();
+	}
+	DestroyUpdatePanel();
+
 	MountPakConsoleCommand.Reset();
 	CheckForUpdateConsoleCommand.Reset();
 	StatusConsoleCommand.Reset();
 	ConfirmUpdateConsoleCommand.Reset();
 	SelfTestConsoleCommand.Reset();
+	RetryUpdateConsoleCommand.Reset();
 	Super::Deinitialize();
 }
+
+// ---------------------------------------------------------------------------
+// 挂载（Day 1 / Day 5）
+// ---------------------------------------------------------------------------
 
 bool UHotUpdateSubsystem::MountPak(const FString& PakFilePath)
 {
 	EnsureMountPipeline();
 
-	// 挂载本身交给 UPakMounter；子系统负责挂载成功后的资源生效通知。
 	if (!PakMounter || !PakMounter->MountPak(PakFilePath, DefaultPatchPakOrder))
 	{
 		return false;
 	}
 
-	// 手动挂载成功后同样触发生效链；版本优先用最近检测到的远端版本。
 	const FString AppliedVersion = (VersionManager && !VersionManager->GetRemoteVersion().IsEmpty())
 		? VersionManager->GetRemoteVersion()
 		: FString(TEXT("1.1.0"));
@@ -121,6 +150,21 @@ TArray<FString> UHotUpdateSubsystem::GetMountedPakFilenames() const
 	return PakMounter ? PakMounter->GetMountedPakFilenames() : TArray<FString>();
 }
 
+void UHotUpdateSubsystem::NotifyHotfixApplied(const FString& NewVersion)
+{
+	if (!NewVersion.IsEmpty())
+	{
+		CurrentVersionString = NewVersion;
+	}
+
+	bPatchMounted = true;
+	OnHotfixApplied.Broadcast(CurrentVersionString);
+}
+
+// ---------------------------------------------------------------------------
+// 控制台命令
+// ---------------------------------------------------------------------------
+
 void UHotUpdateSubsystem::HandleMountPakCommand(const TArray<FString>& Args)
 {
 	if (Args.Num() < 1)
@@ -129,8 +173,6 @@ void UHotUpdateSubsystem::HandleMountPakCommand(const TArray<FString>& Args)
 		return;
 	}
 
-	// Join in case the path contains spaces, then strip surrounding double quotes
-	// (the UE console passes quotes through literally instead of stripping them).
 	FString PakPath = FString::Join(Args, TEXT(" "));
 	PakPath.TrimStartAndEndInline();
 	if (PakPath.Len() >= 2 && PakPath[0] == TEXT('"') && PakPath[PakPath.Len() - 1] == TEXT('"'))
@@ -150,7 +192,6 @@ void UHotUpdateSubsystem::HandleCheckForUpdateCommand(const TArray<FString>& Arg
 
 void UHotUpdateSubsystem::HandleStatusCommand(const TArray<FString>& Args)
 {
-	// 本地版本即时从存档读取；远端版本来自最近一次检测（由 CheckForUpdate 填充）。
 	const FString LocalVersion = VersionManager
 		? VersionManager->QueryLocalVersion()
 		: FString(TEXT("<未初始化>"));
@@ -158,19 +199,44 @@ void UHotUpdateSubsystem::HandleStatusCommand(const TArray<FString>& Args)
 		? VersionManager->GetRemoteVersion()
 		: FString(TEXT("<未知，尚未成功检测>"));
 	const FString StateName = UUpdateStateMachine::GetStateDisplayName(GetUpdateState());
+	const FString StablePak = VersionManager ? VersionManager->GetStablePakFileName() : FString();
 
 	const FString Message = FString::Printf(
-		TEXT("HotUpdate 状态：本地版本=%s，远端版本=%s，当前状态=%s"),
-		*LocalVersion, *RemoteVersion, *StateName);
+		TEXT("HotUpdate 状态：本地版本=%s，远端版本=%s，当前状态=%s，稳定补丁=%s，错误=%s"),
+		*LocalVersion, *RemoteVersion, *StateName,
+		StablePak.IsEmpty() ? TEXT("<无>") : *StablePak,
+		*GetLastErrorText());
 
 	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] %s"), *Message);
-
-	// 打包版 Log 不上屏，这里用 AddOnScreenDebugMessage 给出可见反馈。
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 10.0f, FColor::Cyan, Message);
 	}
 }
+
+void UHotUpdateSubsystem::HandleConfirmUpdateCommand(const TArray<FString>& Args)
+{
+	ConfirmUpdate();
+}
+
+void UHotUpdateSubsystem::HandleRetryUpdateCommand(const TArray<FString>& Args)
+{
+	RetryUpdate();
+}
+
+void UHotUpdateSubsystem::HandleSelfTestCommand(const TArray<FString>& Args)
+{
+	const bool bPassed = HotUpdateSha256::RunSelfTest();
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 10.0f, bPassed ? FColor::Green : FColor::Red,
+			bPassed ? TEXT("SHA-256 自测通过") : TEXT("SHA-256 自测失败（见日志）"));
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 版本检测
+// ---------------------------------------------------------------------------
 
 void UHotUpdateSubsystem::StartUpdateCheck()
 {
@@ -188,35 +254,39 @@ EHotUpdateState UHotUpdateSubsystem::GetUpdateState() const
 	return UpdateStateMachine ? UpdateStateMachine->GetCurrentState() : EHotUpdateState::Idle;
 }
 
-void UHotUpdateSubsystem::HandleConfirmUpdateCommand(const TArray<FString>& Args)
-{
-	ConfirmUpdate();
-}
-
-void UHotUpdateSubsystem::HandleSelfTestCommand(const TArray<FString>& Args)
-{
-	const bool bPassed = HotUpdateSha256::RunSelfTest();
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 10.0f, bPassed ? FColor::Green : FColor::Red,
-			bPassed ? TEXT("SHA-256 自测通过") : TEXT("SHA-256 自测失败（见日志）"));
-	}
-}
-
 void UHotUpdateSubsystem::HandleVersionCheckCompleted(EHotUpdateState ResultState, const FString& RemoteVersion)
 {
 	if (ResultState == EHotUpdateState::ForceUpdate)
 	{
-		// 强制更新：检测完成即自动下载，不等用户确认。
+		const FString Remote = VersionManager ? VersionManager->GetRemoteVersion() : FString();
+		const FString LastFailed = VersionManager ? VersionManager->GetLastFailedVersion() : FString();
+
+		// 防 ForceUpdate 跨重启死循环：同一版本上次更新失败则不再自动下载。
+		if (!LastFailed.IsEmpty() && LastFailed == Remote)
+		{
+			UE_LOG(LogHotUpdate, Warning,
+				TEXT("[HotUpdate] 强制更新被跳过：版本 %s 上次更新失败，请手动重试（HotUpdate.RetryUpdate 或界面按钮）。"), *Remote);
+			RefreshUpdatePanel();
+			return;
+		}
+
 		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 强制更新，自动开始下载。"));
 		StartDownload();
 	}
 	else if (ResultState == EHotUpdateState::NeedUpdate)
 	{
-		// 普通更新：停在 NeedUpdate 等待确认（Day 4 用控制台命令模拟，Day 6 换成 UI）。
-		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 需更新，等待用户确认；执行 HotUpdate.ConfirmUpdate 开始下载。"));
+		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 需更新，等待用户确认（HotUpdate.ConfirmUpdate 或界面按钮）。"));
+	}
+	else if (ResultState == EHotUpdateState::Failed)
+	{
+		// 清单拉取 / 解析失败：统一走终态失败（no-op 回滚，稳定版不受影响）。
+		HandleTerminalFailure(EHotUpdateError::ManifestParse);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 下载 + 校验（Day 4 / Day 6）
+// ---------------------------------------------------------------------------
 
 void UHotUpdateSubsystem::StartDownload()
 {
@@ -230,29 +300,36 @@ void UHotUpdateSubsystem::StartDownload()
 	if (!Info.IsValid())
 	{
 		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 下载信息缺失（version.json 无 pak.url），无法下载。"));
-		if (UpdateStateMachine)
-		{
-			UpdateStateMachine->TransitionTo(EHotUpdateState::Failed);
-		}
+		HandleTerminalFailure(EHotUpdateError::ManifestParse);
 		return;
 	}
+
+	// 重置本次流程状态
+	LastError = EHotUpdateError::None;
+	bLastAttemptSucceeded = false;
+	DownloadBytesReceived = 0;
+	DownloadBytesTotal = 0;
+	LastStats = FHotUpdateStats();
+	AttemptStartTime = FPlatformTime::Seconds();
 
 	PendingPakInfo = Info;
 	DownloadedPakPath.Reset();
 
-	// 可写目录：Saved/HotUpdate。
-	// 注意：不能用 Saved/Paks —— 引擎的 FPakPlatformFile::GetPakFolders() 会把
-	// ProjectSavedDir/Paks 也加入 pak 扫描目录（ALL_PAKS_WILDCARD="*.pak"），
-	// 下载进去的补丁会在下次启动被引擎自动挂载并占用文件句柄，导致改名覆盖失败，
-	// 还会被引擎抢先挂载、绕过我们自己的 order/mount 逻辑。Saved/HotUpdate 不在扫描列表内。
-	const FString PakDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("HotUpdate"));
+	// 下载前磁盘空间预检（不足则直接终态失败，不重试）。
+	if (!PreflightDiskSpace(PendingPakInfo.Size))
+	{
+		HandleTerminalFailure(EHotUpdateError::DiskSpace);
+		return;
+	}
+
+	const FString PakDirectory = UPakMounter::GetLocalPatchDirectory();
 	IFileManager::Get().MakeDirectory(*PakDirectory, true);
 
-	const FString FileName = FPaths::GetCleanFilename(PendingPakInfo.Url);
-	TempPakPath = FPaths::Combine(PakDirectory, FileName + TEXT(".tmp"));
+	const FString UniqueFileName = BuildUniquePakFileName();
+	TempPakPath = FPaths::Combine(PakDirectory, UniqueFileName + TEXT(".tmp"));
 	DownloadAttempt = 0;
 
-	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 下载目录：%s"), *PakDirectory);
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 下载目录：%s，落地名：%s"), *PakDirectory, *UniqueFileName);
 
 	EnsureDownloadPipeline();
 	BeginDownloadAttempt();
@@ -271,12 +348,62 @@ void UHotUpdateSubsystem::ConfirmUpdate()
 	StartDownload();
 }
 
+void UHotUpdateSubsystem::RetryUpdate()
+{
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 用户重试：清除失败记录并重新检测。"));
+	if (VersionManager)
+	{
+		VersionManager->SaveLastFailedVersion(FString());
+	}
+	LastError = EHotUpdateError::None;
+	bLastAttemptSucceeded = false;
+	StartUpdateCheck();
+}
+
+FString UHotUpdateSubsystem::BuildUniquePakFileName() const
+{
+	const FString Remote = (VersionManager && !VersionManager->GetRemoteVersion().IsEmpty())
+		? VersionManager->GetRemoteVersion()
+		: FString(TEXT("unknown"));
+	const FString Sha8 = PendingPakInfo.Sha256.Left(8);
+	return FString::Printf(TEXT("Patch_%s_%s.pak"), *Remote, *Sha8);
+}
+
+bool UHotUpdateSubsystem::PreflightDiskSpace(int64 RequiredBytes) const
+{
+	if (RequiredBytes <= 0)
+	{
+		return true;
+	}
+
+	const FString Dir = UPakMounter::GetLocalPatchDirectory();
+	uint64 Total = 0;
+	uint64 Free = 0;
+	if (!FPlatformMisc::GetDiskTotalAndFreeSpace(Dir, Total, Free))
+	{
+		// 查询失败不阻断下载。
+		return true;
+	}
+
+	const int64 Available = int64(Free);
+	if (Available < RequiredBytes + RequiredDiskSpaceMargin)
+	{
+		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate][Disk] 磁盘空间不足：需要 %lld + 余量 %lld，可用 %lld。"),
+			RequiredBytes, RequiredDiskSpaceMargin, Available);
+		return false;
+	}
+
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate][Disk] 磁盘空间检查通过：需要 %lld，可用 %lld。"), RequiredBytes, Available);
+	return true;
+}
+
 void UHotUpdateSubsystem::EnsureDownloadPipeline()
 {
 	if (!PakDownloader)
 	{
 		PakDownloader = NewObject<UPakDownloader>(this);
 		PakDownloader->OnComplete.AddDynamic(this, &UHotUpdateSubsystem::HandlePakDownloadComplete);
+		PakDownloader->OnProgress.AddDynamic(this, &UHotUpdateSubsystem::HandlePakDownloadProgress);
 	}
 	if (!PakVerifier)
 	{
@@ -287,6 +414,9 @@ void UHotUpdateSubsystem::EnsureDownloadPipeline()
 void UHotUpdateSubsystem::BeginDownloadAttempt()
 {
 	++DownloadAttempt;
+	DownloadStartTime = FPlatformTime::Seconds();
+	DownloadBytesReceived = 0;
+	DownloadBytesTotal = 0;
 
 	if (UpdateStateMachine)
 	{
@@ -299,21 +429,55 @@ void UHotUpdateSubsystem::BeginDownloadAttempt()
 	PakDownloader->StartDownload(PendingPakInfo.Url, TempPakPath);
 }
 
-void UHotUpdateSubsystem::CleanupTempPakFile()
+void UHotUpdateSubsystem::HandlePakDownloadProgress(int64 BytesReceived, int64 TotalBytes)
 {
-	if (TempPakPath.IsEmpty())
+	DownloadBytesReceived = BytesReceived;
+	DownloadBytesTotal = TotalBytes;
+	OnDownloadProgress.Broadcast(BytesReceived, TotalBytes);
+	RefreshUpdatePanel();
+}
+
+void UHotUpdateSubsystem::HandlePakDownloadComplete(bool bSuccess, const FString& LocalPath)
+{
+	if (!bSuccess)
 	{
+		HandleDownloadAttemptFailed(EHotUpdateError::Network, TEXT("下载失败（连接失败 / HTTP 非 200 / 写入失败）"));
 		return;
 	}
 
-	if (IFileManager::Get().FileExists(*TempPakPath))
+	LastStats.DownloadSeconds = FPlatformTime::Seconds() - DownloadStartTime;
+	LastStats.PakSize = PendingPakInfo.Size;
+
+	if (UpdateStateMachine)
 	{
-		IFileManager::Get().Delete(*TempPakPath, false, true, true);
-		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 已删除临时文件：%s"), *TempPakPath);
+		UpdateStateMachine->TransitionTo(EHotUpdateState::Verifying);
 	}
+
+	VerifyStartTime = FPlatformTime::Seconds();
+	const EPakVerifyResult Result = PakVerifier
+		? PakVerifier->Verify(LocalPath, PendingPakInfo.Sha256, PendingPakInfo.Size)
+		: EPakVerifyResult::ReadError;
+	LastStats.VerifySeconds = FPlatformTime::Seconds() - VerifyStartTime;
+
+	if (Result == EPakVerifyResult::Success)
+	{
+		FinalizeDownloadedPak();
+		return;
+	}
+
+	EHotUpdateError Error = EHotUpdateError::HashMismatch;
+	switch (Result)
+	{
+	case EPakVerifyResult::SizeMismatch: Error = EHotUpdateError::SizeMismatch; break;
+	case EPakVerifyResult::HashMismatch: Error = EHotUpdateError::HashMismatch; break;
+	case EPakVerifyResult::FileNotFound:
+	case EPakVerifyResult::ReadError:    Error = EHotUpdateError::FileIO; break;
+	default: break;
+	}
+	HandleDownloadAttemptFailed(Error, UPakVerifier::GetResultDisplayName(Result));
 }
 
-void UHotUpdateSubsystem::HandleDownloadAttemptFailed(const FString& Reason)
+void UHotUpdateSubsystem::HandleDownloadAttemptFailed(EHotUpdateError Error, const FString& Reason)
 {
 	UE_LOG(LogHotUpdate, Warning, TEXT("[HotUpdate] 第 %d/%d 次尝试失败：%s"),
 		DownloadAttempt, MaxDownloadAttempts, *Reason);
@@ -327,38 +491,18 @@ void UHotUpdateSubsystem::HandleDownloadAttemptFailed(const FString& Reason)
 	}
 	else
 	{
-		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 重试次数耗尽（共 %d 次），进入 Failed。"), MaxDownloadAttempts);
-		if (UpdateStateMachine)
-		{
-			UpdateStateMachine->TransitionTo(EHotUpdateState::Failed);
-		}
+		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 重试次数耗尽（共 %d 次）。"), MaxDownloadAttempts);
+		HandleTerminalFailure(Error);
 	}
 }
 
-void UHotUpdateSubsystem::HandlePakDownloadComplete(bool bSuccess, const FString& LocalPath)
+void UHotUpdateSubsystem::CleanupTempPakFile()
 {
-	if (!bSuccess)
+	if (!TempPakPath.IsEmpty() && IFileManager::Get().FileExists(*TempPakPath))
 	{
-		HandleDownloadAttemptFailed(TEXT("下载失败"));
-		return;
+		IFileManager::Get().Delete(*TempPakPath, false, true, true);
+		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 已删除临时文件：%s"), *TempPakPath);
 	}
-
-	if (UpdateStateMachine)
-	{
-		UpdateStateMachine->TransitionTo(EHotUpdateState::Verifying);
-	}
-
-	const EPakVerifyResult Result = PakVerifier
-		? PakVerifier->Verify(LocalPath, PendingPakInfo.Sha256, PendingPakInfo.Size)
-		: EPakVerifyResult::ReadError;
-
-	if (Result == EPakVerifyResult::Success)
-	{
-		FinalizeDownloadedPak();
-		return;
-	}
-
-	HandleDownloadAttemptFailed(UPakVerifier::GetResultDisplayName(Result));
 }
 
 void UHotUpdateSubsystem::FinalizeDownloadedPak()
@@ -372,7 +516,7 @@ void UHotUpdateSubsystem::FinalizeDownloadedPak()
 	if (!IFileManager::Get().Move(*FinalPath, *TempPakPath, true, true))
 	{
 		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 改名失败：%s -> %s"), *TempPakPath, *FinalPath);
-		HandleDownloadAttemptFailed(TEXT("改名为 .pak 失败"));
+		HandleDownloadAttemptFailed(EHotUpdateError::FileIO, TEXT("改名为 .pak 失败"));
 		return;
 	}
 
@@ -385,13 +529,16 @@ void UHotUpdateSubsystem::FinalizeDownloadedPak()
 			FString::Printf(TEXT("热更包已下载并校验通过：%s"), *FPaths::GetCleanFilename(FinalPath)));
 	}
 
-	// Day 5：改名成功后进入挂载 → 生效 → 持久化。
 	if (UpdateStateMachine)
 	{
 		UpdateStateMachine->TransitionTo(EHotUpdateState::Mounting);
 	}
 	MountDownloadedPak();
 }
+
+// ---------------------------------------------------------------------------
+// 挂载 → 生效 → 持久化（Day 5 / Day 6）
+// ---------------------------------------------------------------------------
 
 void UHotUpdateSubsystem::EnsureMountPipeline()
 {
@@ -401,44 +548,49 @@ void UHotUpdateSubsystem::EnsureMountPipeline()
 	}
 }
 
-void UHotUpdateSubsystem::RemountLocalPatches()
+void UHotUpdateSubsystem::RemountStablePatch()
 {
 	EnsureMountPipeline();
 
 	const FString PatchDirectory = UPakMounter::GetLocalPatchDirectory();
-	TArray<FString> PakFiles;
-	IFileManager::Get().FindFiles(PakFiles, *(FPaths::Combine(PatchDirectory, TEXT("*.pak"))), true, false);
+	const FString StableFile = VersionManager ? VersionManager->GetStablePakFileName() : FString();
 
-	if (PakFiles.Num() == 0)
+	if (StableFile.IsEmpty())
 	{
-		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 启动重挂载：本地无补丁（%s）。"), *PatchDirectory);
+		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 启动重挂载：无稳定补丁记录（基础版）。"));
 		return;
 	}
 
-	// 文件名排序，保证挂载顺序稳定（多补丁排序是 Day 6 的事）。
-	PakFiles.Sort();
-
-	int32 MountedCount = 0;
-	for (const FString& PakFileName : PakFiles)
+	const FString StablePath = FPaths::Combine(PatchDirectory, StableFile);
+	if (!IFileManager::Get().FileExists(*StablePath))
 	{
-		const FString PakPath = FPaths::Combine(PatchDirectory, PakFileName);
-		if (PakMounter->MountPak(PakPath, DefaultPatchPakOrder))
+		UE_LOG(LogHotUpdate, Warning, TEXT("[HotUpdate] 记录的稳定补丁缺失：%s，回落基础版并重置版本。"), *StableFile);
+		if (VersionManager)
 		{
-			++MountedCount;
+			VersionManager->SaveStableInfo(UVersionRecord::GetBaseVersion(), FString());
 		}
+		return;
 	}
 
-	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 启动重挂载完成：%d/%d 个本地补丁已挂载。"),
-		MountedCount, PakFiles.Num());
+	const FString StableVersion = VersionManager ? VersionManager->QueryLocalVersion() : FString();
 
-	// 挂了本地补丁后，视为「热更已应用」：
-	// 设置 bPatchMounted 并更新版本，使随后的 ABaseHotTestActor::BeginPlay
-	// 触发 OnHotfixApplied()，让测试场景/UI 重新读取（补丁里的）资源。
-	// 否则资源文件虽已是新版，但 UI 刷新链路不会运行（贴图这类自动采样的资源不受影响）。
-	if (MountedCount > 0)
+	if (PakMounter->MountPak(StablePath, DefaultPatchPakOrder))
 	{
-		const FString LocalVersion = VersionManager ? VersionManager->QueryLocalVersion() : FString();
-		NotifyHotfixApplied(LocalVersion);
+		// 挂载成功：补通知链（#11），让测试场景在 BeginPlay 刷新为补丁资源。
+		NotifyHotfixApplied(StableVersion);
+		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 启动重挂载稳定补丁成功：%s（版本 %s）。"), *StableFile, *StableVersion);
+	}
+	else
+	{
+		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 启动重挂载稳定补丁失败（文件损坏？）：%s，删除并回落基础版。"), *StableFile);
+		IFileManager::Get().Delete(*StablePath, false, true, true);
+		bPatchMounted = false;
+		CurrentVersionString = UVersionRecord::GetBaseVersion();
+		if (VersionManager)
+		{
+			VersionManager->SaveLastFailedVersion(StableVersion);
+			VersionManager->SaveStableInfo(UVersionRecord::GetBaseVersion(), FString());
+		}
 	}
 }
 
@@ -447,23 +599,21 @@ void UHotUpdateSubsystem::MountDownloadedPak()
 	if (DownloadedPakPath.IsEmpty())
 	{
 		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] MountDownloadedPak: 本地 Pak 路径为空，无法挂载。"));
-		if (UpdateStateMachine)
-		{
-			UpdateStateMachine->TransitionTo(EHotUpdateState::Failed);
-		}
+		HandleTerminalFailure(EHotUpdateError::FileIO);
 		return;
 	}
 
 	EnsureMountPipeline();
 
 	const int32 MountOrder = (PendingPakInfo.Order > 0) ? PendingPakInfo.Order : DefaultPatchPakOrder;
-	if (!PakMounter->MountPak(DownloadedPakPath, MountOrder))
+	MountStartTime = FPlatformTime::Seconds();
+	const bool bMounted = PakMounter->MountPak(DownloadedPakPath, MountOrder);
+	LastStats.MountSeconds = FPlatformTime::Seconds() - MountStartTime;
+
+	if (!bMounted)
 	{
 		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 挂载下载的 Pak 失败：%s"), *DownloadedPakPath);
-		if (UpdateStateMachine)
-		{
-			UpdateStateMachine->TransitionTo(EHotUpdateState::Failed);
-		}
+		HandleTerminalFailure(EHotUpdateError::MountFailed);
 		return;
 	}
 
@@ -471,22 +621,296 @@ void UHotUpdateSubsystem::MountDownloadedPak()
 	const FString RemoteVersion = VersionManager ? VersionManager->GetRemoteVersion() : FString();
 	NotifyHotfixApplied(RemoteVersion);
 
-	// FR-08 唯一写入点：挂载成功后持久化本地版本。
-	if (VersionManager && !RemoteVersion.IsEmpty())
+	// FR-08 唯一写入点：挂载成功后写入稳定版本 + 稳定补丁文件名。
+	if (VersionManager)
 	{
-		VersionManager->SaveLocalVersion(RemoteVersion);
+		VersionManager->SaveStableInfo(
+			RemoteVersion.IsEmpty() ? UVersionRecord::GetBaseVersion() : RemoteVersion,
+			FPaths::GetCleanFilename(DownloadedPakPath));
+	}
+
+	LastStats.Attempts = DownloadAttempt;
+	LastStats.TotalSeconds = FPlatformTime::Seconds() - AttemptStartTime;
+	LastError = EHotUpdateError::None;
+	bLastAttemptSucceeded = true;
+	LogStats();
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Green,
+			FString::Printf(TEXT("更新完成：版本 %s"), *CurrentVersionString));
 	}
 
 	if (UpdateStateMachine)
 	{
 		UpdateStateMachine->TransitionTo(EHotUpdateState::Done);
 	}
+	RefreshUpdatePanel();
+}
+
+// ---------------------------------------------------------------------------
+// 终态失败 + 回滚（Day 6）
+// ---------------------------------------------------------------------------
+
+void UHotUpdateSubsystem::HandleTerminalFailure(EHotUpdateError Error)
+{
+	LastError = Error;
+	UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 更新失败：%s"), *GetLastErrorText());
+
+	LastStats.Attempts = DownloadAttempt;
+	if (AttemptStartTime > 0.0)
+	{
+		LastStats.TotalSeconds = FPlatformTime::Seconds() - AttemptStartTime;
+	}
+	LogStats();
+
+	if (UpdateStateMachine)
+	{
+		UpdateStateMachine->TransitionTo(EHotUpdateState::Failed);
+	}
+
+	// 只有 Mount 失败需要实质回滚（卸载/删包/重置稳定版）；其余为清理残留的 no-op。
+	Rollback(Error == EHotUpdateError::MountFailed);
+}
+
+void UHotUpdateSubsystem::Rollback(bool bUndoStable)
+{
+	if (UpdateStateMachine)
+	{
+		UpdateStateMachine->TransitionTo(EHotUpdateState::RollingBack);
+	}
+
+	UE_LOG(LogHotUpdate, Warning, TEXT("[HotUpdate] 开始回滚（%s）。"),
+		bUndoStable ? TEXT("实质回滚：卸载坏包 + 重置稳定版") : TEXT("仅清理残留，稳定版不变"));
+
+	if (bUndoStable && PakMounter && !DownloadedPakPath.IsEmpty())
+	{
+		PakMounter->UnmountPak(DownloadedPakPath);
+	}
+
+	CleanupDownloadArtifacts();
+
+	if (bUndoStable)
+	{
+		bPatchMounted = false;
+		CurrentVersionString = UVersionRecord::GetBaseVersion();
+		if (VersionManager)
+		{
+			VersionManager->SaveStableInfo(UVersionRecord::GetBaseVersion(), FString());
+		}
+	}
+
+	const FString RemoteVersion = VersionManager ? VersionManager->GetRemoteVersion() : FString();
+	if (VersionManager && !RemoteVersion.IsEmpty())
+	{
+		VersionManager->SaveLastFailedVersion(RemoteVersion);
+	}
+
+	bLastAttemptSucceeded = false;
+	const FString Reverted = bUndoStable
+		? CurrentVersionString
+		: (VersionManager ? VersionManager->QueryLocalVersion() : FString(TEXT("<未知>")));
+
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 已回滚/稳定于版本 %s。"), *Reverted);
+	OnUpdateRolledBack.Broadcast(Reverted);
+
+	if (UpdateStateMachine)
+	{
+		UpdateStateMachine->TransitionTo(EHotUpdateState::Done);
+	}
+	RefreshUpdatePanel();
+}
+
+void UHotUpdateSubsystem::CleanupDownloadArtifacts()
+{
+	auto DeleteIfExists = [](const FString& Path)
+	{
+		if (!Path.IsEmpty() && IFileManager::Get().FileExists(*Path))
+		{
+			IFileManager::Get().Delete(*Path, false, true, true);
+			UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 已删除文件：%s"), *Path);
+		}
+	};
+
+	DeleteIfExists(TempPakPath);
+	DeleteIfExists(DownloadedPakPath);
+	DownloadedPakPath.Reset();
+	TempPakPath.Reset();
+}
+
+void UHotUpdateSubsystem::LogStats() const
+{
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate][Stats] 补丁体积=%lld 字节"), LastStats.PakSize);
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate][Stats] 下载耗时=%.2f 秒"), LastStats.DownloadSeconds);
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate][Stats] 校验耗时=%.2f 秒"), LastStats.VerifySeconds);
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate][Stats] 挂载耗时=%.2f 秒"), LastStats.MountSeconds);
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate][Stats] 总耗时=%.2f 秒（尝试 %d 次）"),
+		LastStats.TotalSeconds, LastStats.Attempts);
+}
+
+// ---------------------------------------------------------------------------
+// UI 查询接口（Day 6）
+// ---------------------------------------------------------------------------
+
+FString UHotUpdateSubsystem::GetRemoteVersionString() const
+{
+	return VersionManager ? VersionManager->GetRemoteVersion() : FString();
+}
+
+FString UHotUpdateSubsystem::GetLastErrorText() const
+{
+	switch (LastError)
+	{
+	case EHotUpdateError::None:          return TEXT("无");
+	case EHotUpdateError::Network:       return TEXT("网络异常（断网 / 连接失败 / HTTP 非 200）");
+	case EHotUpdateError::ManifestParse: return TEXT("版本清单获取或解析失败");
+	case EHotUpdateError::SizeMismatch:  return TEXT("文件大小不符");
+	case EHotUpdateError::HashMismatch:  return TEXT("SHA-256 校验不符");
+	case EHotUpdateError::DiskSpace:     return TEXT("磁盘空间不足");
+	case EHotUpdateError::FileIO:        return TEXT("文件读写失败");
+	case EHotUpdateError::MountFailed:   return TEXT("Pak 挂载失败（已回滚）");
+	case EHotUpdateError::RollbackFailed:return TEXT("回滚失败");
+	default:                             return TEXT("未知错误");
+	}
+}
+
+FString UHotUpdateSubsystem::GetStatusText() const
+{
+	const EHotUpdateState State = GetUpdateState();
+	const FString Local = VersionManager ? VersionManager->QueryLocalVersion() : FString(TEXT("?"));
+	const FString Remote = GetRemoteVersionString();
+
+	switch (State)
+	{
+	case EHotUpdateState::Idle:       return TEXT("就绪");
+	case EHotUpdateState::Checking:   return TEXT("正在检查更新…");
+	case EHotUpdateState::UpToDate:   return FString::Printf(TEXT("已是最新版本（%s）"), *Local);
+	case EHotUpdateState::NeedUpdate: return FString::Printf(TEXT("发现新版本 %s（当前 %s）"), *Remote, *Local);
+	case EHotUpdateState::ForceUpdate:
+	{
+		const FString LastFailed = VersionManager ? VersionManager->GetLastFailedVersion() : FString();
+		if (!LastFailed.IsEmpty() && LastFailed == Remote)
+		{
+			return FString::Printf(TEXT("需要更新到 %s；上次更新失败，请手动重试"), *Remote);
+		}
+		return FString::Printf(TEXT("需要更新到 %s"), *Remote);
+	}
+	case EHotUpdateState::Downloading:
+		return FString::Printf(TEXT("正在下载… %d%%"), FMath::RoundToInt(GetDownloadProgress() * 100.0f));
+	case EHotUpdateState::Verifying:  return TEXT("正在校验文件…");
+	case EHotUpdateState::Mounting:   return TEXT("正在挂载…");
+	case EHotUpdateState::Done:
+		return bLastAttemptSucceeded
+			? FString::Printf(TEXT("更新完成（%s）"), *Local)
+			: FString::Printf(TEXT("已回滚 / 保持版本 %s"), *Local);
+	case EHotUpdateState::Failed:     return FString::Printf(TEXT("更新失败：%s"), *GetLastErrorText());
+	case EHotUpdateState::RollingBack:return TEXT("更新失败，正在回滚…");
+	default:                          return FString();
+	}
+}
+
+float UHotUpdateSubsystem::GetDownloadProgress() const
+{
+	return DownloadBytesTotal > 0 ? float(double(DownloadBytesReceived) / double(DownloadBytesTotal)) : 0.0f;
+}
+
+// ---------------------------------------------------------------------------
+// Slate 面板（Day 6）
+// ---------------------------------------------------------------------------
+
+void UHotUpdateSubsystem::HandleEngineLoopInitComplete()
+{
+	CreateUpdatePanel();
+}
+
+void UHotUpdateSubsystem::CreateUpdatePanel()
+{
+	if (UpdatePanel.IsValid())
+	{
+		return;
+	}
+	if (!GEngine || !GEngine->GameViewport)
+	{
+		// GameViewport 尚未就绪；等 OnFEngineLoopInitComplete 回调。
+		return;
+	}
+
+	UpdatePanel = SNew(SUpdatePanel).Subsystem(this);
+	GEngine->GameViewport->AddViewportWidgetContent(UpdatePanel.ToSharedRef(), 100);
+	RefreshUpdatePanel();
+	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] Slate 更新面板已加入视口。"));
+}
+
+void UHotUpdateSubsystem::DestroyUpdatePanel()
+{
+	if (UpdatePanel.IsValid())
+	{
+		if (GEngine && GEngine->GameViewport)
+		{
+			GEngine->GameViewport->RemoveViewportWidgetContent(UpdatePanel.ToSharedRef());
+		}
+		UpdatePanel.Reset();
+	}
+
+	// 面板销毁后恢复默认输入模式。
+	ApplyUpdateInputMode(false);
+}
+
+void UHotUpdateSubsystem::RefreshUpdatePanel()
+{
+	if (!UpdatePanel.IsValid())
+	{
+		return;
+	}
+
+	UpdatePanel->Refresh();
+
+	// 面板可见时开鼠标、切 GameAndUI，便于点击按钮；隐藏时恢复。
+	// 用面板实际可见性判断（面板内部可能因「跳过」而自行隐藏）。
+	ApplyUpdateInputMode(UpdatePanel->GetVisibility().IsVisible());
+}
+
+void UHotUpdateSubsystem::ApplyUpdateInputMode(bool bUIActive)
+{
+	if (bUpdateInputModeApplied == bUIActive)
+	{
+		return;
+	}
+
+	APlayerController* PC = nullptr;
+	if (UGameInstance* GameInstance = GetGameInstance())
+	{
+		if (UWorld* World = GameInstance->GetWorld())
+		{
+			PC = World->GetFirstPlayerController();
+		}
+	}
+
+	if (!PC)
+	{
+		// PlayerController 还没就绪：不改缓存，留待下次调用（面板 Tick 会重试）。
+		return;
+	}
+
+	if (bUIActive)
+	{
+		PC->SetShowMouseCursor(true);
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		PC->SetInputMode(InputMode);
+	}
+	else
+	{
+		PC->SetShowMouseCursor(false);
+		PC->SetInputMode(FInputModeGameOnly());
+	}
+
+	bUpdateInputModeApplied = bUIActive;
 }
 
 void UHotUpdateSubsystem::HandleUpdateStateChanged(EHotUpdateState OldState, EHotUpdateState NewState)
 {
-	// Log-level messages don't show on screen in a packaged build, so surface the
-	// state change with a colored on-screen message as well (see Day 1 pitfall #3).
 	if (GEngine)
 	{
 		FColor Color = FColor::Green;
@@ -498,7 +922,8 @@ void UHotUpdateSubsystem::HandleUpdateStateChanged(EHotUpdateState OldState, EHo
 		{
 			Color = FColor::Red;
 		}
-		else if (NewState == EHotUpdateState::Downloading || NewState == EHotUpdateState::Verifying)
+		else if (NewState == EHotUpdateState::Downloading || NewState == EHotUpdateState::Verifying
+			|| NewState == EHotUpdateState::Mounting || NewState == EHotUpdateState::RollingBack)
 		{
 			Color = FColor::Cyan;
 		}
@@ -508,15 +933,5 @@ void UHotUpdateSubsystem::HandleUpdateStateChanged(EHotUpdateState OldState, EHo
 	}
 
 	OnUpdateStateChanged.Broadcast(OldState, NewState);
-}
-
-void UHotUpdateSubsystem::NotifyHotfixApplied(const FString& NewVersion)
-{
-	if (!NewVersion.IsEmpty())
-	{
-		CurrentVersionString = NewVersion;
-	}
-
-	bPatchMounted = true;
-	OnHotfixApplied.Broadcast(CurrentVersionString);
+	RefreshUpdatePanel();
 }

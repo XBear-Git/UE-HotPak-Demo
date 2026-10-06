@@ -12,20 +12,14 @@
 
 #include "../HotPakDemo.h"
 
-namespace
-{
-	// 本地没有存档时的默认基线版本，与基础包一致。
-	const TCHAR* DefaultLocalVersion = TEXT("1.0.0");
-}
-
 void UVersionManager::Initialize(UUpdateStateMachine* InStateMachine)
 {
 	StateMachine = InStateMachine;
 
-	// 持久化对象由本管理器持有（对应 FR-08），生命周期与 GameInstance 对齐。
+	// 载入现有记录（保留 StablePakFileName / LastFailedVersion）；本地状态由本管理器持有。
 	if (!VersionRecord)
 	{
-		VersionRecord = NewObject<UVersionRecord>(this);
+		VersionRecord = UVersionRecord::LoadOrCreateRecord();
 	}
 }
 
@@ -36,7 +30,7 @@ void UVersionManager::CheckForUpdate()
 		StateMachine->TransitionTo(EHotUpdateState::Checking);
 	}
 
-	LocalVersion = UVersionRecord::LoadVersion(DefaultLocalVersion);
+	LocalVersion = UVersionRecord::LoadVersion(UVersionRecord::GetBaseVersion());
 	RemoteVersion.Reset();
 
 	UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 开始检测更新：本地版本=%s，远端清单=%s。"),
@@ -59,17 +53,44 @@ void UVersionManager::CheckForUpdate()
 FString UVersionManager::QueryLocalVersion() const
 {
 	// 直接从存档读取，避免在尚未检测或检测失败时拿到空的缓存值。
-	return UVersionRecord::LoadVersion(DefaultLocalVersion);
+	return UVersionRecord::LoadVersion(UVersionRecord::GetBaseVersion());
 }
 
 bool UVersionManager::SaveLocalVersion(const FString& InVersion)
 {
 	if (!VersionRecord)
 	{
-		VersionRecord = NewObject<UVersionRecord>(this);
+		VersionRecord = UVersionRecord::LoadOrCreateRecord();
 	}
-
 	return VersionRecord->SaveVersion(InVersion);
+}
+
+FString UVersionManager::GetStablePakFileName() const
+{
+	return VersionRecord ? VersionRecord->StablePakFileName : FString();
+}
+
+FString UVersionManager::GetLastFailedVersion() const
+{
+	return VersionRecord ? VersionRecord->LastFailedVersion : FString();
+}
+
+bool UVersionManager::SaveStableInfo(const FString& InVersion, const FString& InPakFileName)
+{
+	if (!VersionRecord)
+	{
+		VersionRecord = UVersionRecord::LoadOrCreateRecord();
+	}
+	return VersionRecord->SaveStableInfo(InVersion, InPakFileName);
+}
+
+bool UVersionManager::SaveLastFailedVersion(const FString& InVersion)
+{
+	if (!VersionRecord)
+	{
+		VersionRecord = UVersionRecord::LoadOrCreateRecord();
+	}
+	return VersionRecord->SaveLastFailedVersion(InVersion);
 }
 
 int32 UVersionManager::CompareVersion(const FString& VersionA, const FString& VersionB)
@@ -164,7 +185,7 @@ void UVersionManager::ProcessManifest(const FString& JsonText)
 	}
 
 	RemoteVersion = LatestVersion;
-	LocalVersion = UVersionRecord::LoadVersion(DefaultLocalVersion);
+	LocalVersion = UVersionRecord::LoadVersion(UVersionRecord::GetBaseVersion());
 
 	const int32 CompareToLatest = CompareVersion(LocalVersion, RemoteVersion);
 	const bool bBelowMinSupported = !MinSupportedClient.IsEmpty()

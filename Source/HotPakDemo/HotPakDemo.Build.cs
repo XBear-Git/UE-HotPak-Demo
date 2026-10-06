@@ -12,7 +12,8 @@ public class HotPakDemo : ModuleRules
 
 		// PakFile 提供 FPakPlatformFile / FPakFile，用于运行时挂载补丁 Pak（仅 .cpp 使用，故放 Private）。
 		// HTTP/Json/JsonUtilities：Day 3 版本管理器异步拉取并解析 version.json 需要。
-		PrivateDependencyModuleNames.AddRange(new string[] { "PakFile", "HTTP", "Json", "JsonUtilities" });
+		// Slate/SlateCore：Day 6 的 C++ Slate 更新面板（USW UpdatePanel）。
+		PrivateDependencyModuleNames.AddRange(new string[] { "PakFile", "HTTP", "Json", "JsonUtilities", "Slate", "SlateCore" });
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

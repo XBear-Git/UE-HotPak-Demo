@@ -18,6 +18,48 @@ const FString& UVersionRecord::GetSlotName()
 	return SlotName;
 }
 
+FString UVersionRecord::GetBaseVersion()
+{
+	return TEXT("1.0.0");
+}
+
+UVersionRecord* UVersionRecord::LoadOrCreateRecord()
+{
+	if (UGameplayStatics::DoesSaveGameExist(GetSlotName(), VersionRecordUserIndex))
+	{
+		if (UVersionRecord* Loaded = Cast<UVersionRecord>(
+			UGameplayStatics::LoadGameFromSlot(GetSlotName(), VersionRecordUserIndex)))
+		{
+			if (Loaded->LocalVersion.IsEmpty())
+			{
+				Loaded->LocalVersion = GetBaseVersion();
+			}
+			return Loaded;
+		}
+	}
+
+	UVersionRecord* NewRecord = NewObject<UVersionRecord>();
+	NewRecord->LocalVersion = GetBaseVersion();
+	return NewRecord;
+}
+
+bool UVersionRecord::SaveToSlot()
+{
+	const bool bSaved = UGameplayStatics::SaveGameToSlot(this, GetSlotName(), VersionRecordUserIndex);
+	if (bSaved)
+	{
+		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 本地记录已保存：version=%s，stablePak=%s，lastFailed=%s。"),
+			*LocalVersion,
+			StablePakFileName.IsEmpty() ? TEXT("<无>") : *StablePakFileName,
+			LastFailedVersion.IsEmpty() ? TEXT("<无>") : *LastFailedVersion);
+	}
+	else
+	{
+		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 本地记录保存失败（槽 %s）。"), *GetSlotName());
+	}
+	return bSaved;
+}
+
 bool UVersionRecord::SaveVersion(const FString& NewVersion)
 {
 	if (NewVersion.IsEmpty())
@@ -27,18 +69,22 @@ bool UVersionRecord::SaveVersion(const FString& NewVersion)
 	}
 
 	LocalVersion = NewVersion;
-	const bool bSaved = UGameplayStatics::SaveGameToSlot(this, GetSlotName(), VersionRecordUserIndex);
+	return SaveToSlot();
+}
 
-	if (bSaved)
-	{
-		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 本地版本已保存：%s（槽 %s）。"), *LocalVersion, *GetSlotName());
-	}
-	else
-	{
-		UE_LOG(LogHotUpdate, Error, TEXT("[HotUpdate] 本地版本保存失败：%s（槽 %s）。"), *LocalVersion, *GetSlotName());
-	}
+bool UVersionRecord::SaveStableInfo(const FString& InVersion, const FString& InPakFileName)
+{
+	LocalVersion = InVersion.IsEmpty() ? GetBaseVersion() : InVersion;
+	StablePakFileName = InPakFileName;
+	// 更新成功即清除失败记录。
+	LastFailedVersion.Reset();
+	return SaveToSlot();
+}
 
-	return bSaved;
+bool UVersionRecord::SaveLastFailedVersion(const FString& InVersion)
+{
+	LastFailedVersion = InVersion;
+	return SaveToSlot();
 }
 
 FString UVersionRecord::LoadVersion(const FString& DefaultVersion)

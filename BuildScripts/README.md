@@ -9,6 +9,8 @@
 | `hotpatch_config.py` | 共享路径配置 | — |
 | `export_release.py` | 导出基础包基线清单 | ByRelease |
 | `gen_patch.py` | diff + 打增量 Pak + version.json | ByPatch |
+| `verify_patch.py` | 校验补丁内容完整性（Cook diff / 响应文件 / Pak 实际 三重比对） | — |
+| `serve.ps1` | 一键启动本地 HTTP 静态服务（`PatchServer/`，默认 8000） | — |
 
 ## 完整流程
 
@@ -46,15 +48,27 @@ python gen_patch.py 1.0.0 1.1.0
 
 - 输出 `PatchServer/patches/Patch_1.0.0_to_1.1.0.pak`（增量包）
 - 输出 `PatchServer/version.json`（服务端版本清单，含 URL/大小/SHA256）
+- （推荐）校验补丁内容完整性：
 
-### 6. 验证生效
+  ```powershell
+  python verify_patch.py 1.0.0 1.1.0
+  ```
 
-- 把增量 Pak 拷到基础包 `Content\Paks\` 目录 → 重启游戏 → 看到新资源（自动挂载）。
-- 或运行时控制台执行 `HotUpdate.MountPak <pak路径>` 手动挂载验证。
+### 6. 起服务并验证生效
+
+```powershell
+# 启动本地 HTTP 静态服务（提供 version.json 与补丁 Pak）
+powershell -ExecutionPolicy Bypass -File BuildScripts\serve.ps1
+# 或双击项目根目录 start_server.bat
+```
+
+- 打包版客户端启动后会自动「检测 → 下载 → 校验 → 挂载」，右下角有更新面板；重启后仍生效。
+- 也可运行时控制台执行 `HotUpdate.MountPak <pak路径>` 手动挂载验证。
+- ⚠️ **不要把补丁 Pak 放进 `Content/Paks` 或 `Saved/Paks`**：这两处都会被引擎启动时自动挂载，绕过本框架的 order / 回滚逻辑。
 
 ## 原理一句话
 
-**Cook 产物文件级 SHA256 diff**：基线打包后记录资源哈希 → 改资源重新 Cook → 对比哈希找出变更文件 → UnrealPak 把变更文件打成增量 Pak（挂载点 `../../../HotPakDemo/Content/`，运行时 order=100 覆盖基础包 order=0）。
+**Cook 产物文件级 SHA256 diff**：基线打包后记录资源哈希 → 改资源重新 Cook → 对比哈希找出变更文件 → UnrealPak 把变更文件打成增量 Pak（响应文件按 `../../../HotPakDemo/Content/` 前缀写虚拟路径，UnrealPak 自动取公共挂载点；运行时以 order=100 挂载，覆盖基础包 order=0）。
 
 ## 已知局限（后续可扩展）
 
