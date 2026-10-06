@@ -6,6 +6,7 @@
 #include "UObject/Object.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
+#include "PakDownloadInfo.h"
 #include "UpdateStateMachine.h"
 #include "VersionManager.generated.h"
 
@@ -55,6 +56,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Hot Update|Version")
 	FString GetRemoteVersion() const { return RemoteVersion; }
 
+	/** 最近一次解析到的增量 Pak 下载信息（Day 4；未解析到时 Url 为空）。 */
+	UFUNCTION(BlueprintPure, Category = "Hot Update|Version")
+	FPakDownloadInfo GetPakDownloadInfo() const { return PakDownloadInfo; }
+
+	/** 将版本写入本地存档（FR-08：唯一写入点，由挂载成功后调用）。 */
+	UFUNCTION(BlueprintCallable, Category = "Hot Update|Version")
+	bool SaveLocalVersion(const FString& InVersion);
+
 	/** 远端版本清单地址，可配置以便换端口测试。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hot Update|Version")
 	FString VersionManifestUrl = TEXT("http://127.0.0.1:8000/version.json");
@@ -80,6 +89,10 @@ private:
 	/** 本地版本持久化对象。 */
 	UPROPERTY(Transient)
 	TObjectPtr<UVersionRecord> VersionRecord;
+
+	/** 从 version.json 解析出的增量 Pak 下载信息（Day 4）。 */
+	UPROPERTY(Transient)
+	FPakDownloadInfo PakDownloadInfo;
 
 	FString LocalVersion;
 	FString RemoteVersion;

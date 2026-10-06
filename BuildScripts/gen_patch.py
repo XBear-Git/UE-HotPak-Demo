@@ -99,6 +99,16 @@ def build_response_file(changed_files, resp_path):
 
 def run_unrealpak(resp_path, out_pak):
     """调用 UnrealPak.exe 打包。"""
+    # UnrealPak 的 -Create 不会覆盖已存在的 pak，先删除旧文件再打，否则会报
+    # "File already exists at that location."。
+    if os.path.exists(out_pak):
+        try:
+            os.remove(out_pak)
+            print("[gen_patch] 已删除旧的补丁 pak，准备重新生成：{}".format(out_pak))
+        except OSError as e:
+            raise RuntimeError(
+                "无法删除已存在的补丁 pak（可能被占用，请先关闭游戏/HTTP 服务再重试）：{}".format(e))
+
     cmd = [cfg.UNREALPAK, out_pak, "-Create={}".format(resp_path)]
     print("[gen_patch] 执行: {}".format(" ".join(cmd)))
     result = subprocess.run(cmd, capture_output=True, text=True)

@@ -62,6 +62,16 @@ FString UVersionManager::QueryLocalVersion() const
 	return UVersionRecord::LoadVersion(DefaultLocalVersion);
 }
 
+bool UVersionManager::SaveLocalVersion(const FString& InVersion)
+{
+	if (!VersionRecord)
+	{
+		VersionRecord = NewObject<UVersionRecord>(this);
+	}
+
+	return VersionRecord->SaveVersion(InVersion);
+}
+
 int32 UVersionManager::CompareVersion(const FString& VersionA, const FString& VersionB)
 {
 	TArray<FString> PartsA;
@@ -133,6 +143,26 @@ void UVersionManager::ProcessManifest(const FString& JsonText)
 	bool bForceUpdate = false;
 	Root->TryGetBoolField(TEXT("force_update"), bForceUpdate);
 
+	// Day 4：解析 pak 下载信息（url / size / sha256 / order / mount_point）。
+	PakDownloadInfo = FPakDownloadInfo();
+	const TSharedPtr<FJsonObject>* PakObject = nullptr;
+	if (Root->TryGetObjectField(TEXT("pak"), PakObject) && PakObject && PakObject->IsValid())
+	{
+		const TSharedPtr<FJsonObject>& Pak = *PakObject;
+		Pak->TryGetStringField(TEXT("url"), PakDownloadInfo.Url);
+		Pak->TryGetStringField(TEXT("sha256"), PakDownloadInfo.Sha256);
+		Pak->TryGetStringField(TEXT("mount_point"), PakDownloadInfo.MountPoint);
+		Pak->TryGetNumberField(TEXT("size"), PakDownloadInfo.Size);
+		Pak->TryGetNumberField(TEXT("order"), PakDownloadInfo.Order);
+
+		UE_LOG(LogHotUpdate, Log, TEXT("[HotUpdate] 解析到 Pak 下载信息：url=%s，size=%lld，sha256=%s，order=%d。"),
+			*PakDownloadInfo.Url, PakDownloadInfo.Size, *PakDownloadInfo.Sha256, PakDownloadInfo.Order);
+	}
+	else
+	{
+		UE_LOG(LogHotUpdate, Warning, TEXT("[HotUpdate] version.json 缺少 pak 字段，无法下载增量包。"));
+	}
+
 	RemoteVersion = LatestVersion;
 	LocalVersion = UVersionRecord::LoadVersion(DefaultLocalVersion);
 
@@ -167,12 +197,8 @@ void UVersionManager::ProcessManifest(const FString& JsonText)
 			*LocalVersion, *RemoteVersion);
 	}
 
-	// Day 3 验证用：判定为「已最新」时把远端版本写入本地存档，
-	// 便于下一轮启动直接命中「已最新」分支。真正的挂载后写入在 Day 5。
-	if (ResultState == EHotUpdateState::UpToDate && VersionRecord)
-	{
-		VersionRecord->SaveVersion(RemoteVersion);
-	}
+	// 注意：版本写入的唯一入口是「挂载成功后」（UHotUpdateSubsystem::MountDownloadedPak
+	// 调用 SaveLocalVersion）。检测阶段不写盘，避免 local > remote 时把本地版本降级。
 
 	FinishCheck(ResultState);
 }

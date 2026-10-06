@@ -1,11 +1,11 @@
 {
-  "latest_version": "1.0.0",
+  "latest_version": "1.1.0",
   "min_supported_client": "1.0.0",
   "force_update": false,
   "pak": {
     "url": "http://127.0.0.1:8000/patches/Patch_1.0.0_to_1.1.0.pak",
-    "size": 1603,
-    "sha256": "33dc96ebb8526b43ced5633f4f79f9c2c7e3001ffd8ab0010a6e36d8332a27b1",
+    "size": 4206529,
+    "sha256": "3b2e4115e2c2974821739386b2c33ebde459a90c22a9305e28a66b735e5afbfb",
     "order": 100,
     "mount_point": "../../../HotPakDemo/Content/"
   },
